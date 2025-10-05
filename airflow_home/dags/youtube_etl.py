@@ -12,7 +12,7 @@ def fetch_youtube_videos():
     s3_client = boto3.client("s3", region_name=AWS_REGION)
 
     # --- YouTube API Configuration ---
-    API_KEY = "AIzaSyDsOHLVN1oKKD-TBYA_2NApYeSTodg1ImU"
+    API_KEY = "<API-KEY>"
     CHANNEL_ID = "UCk2U-Oqn7RXf-ydPqfSxG5g"
 
     # Step 1: Get Uploads Playlist ID
