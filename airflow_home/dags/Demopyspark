@@ -1,0 +1,85 @@
+import requests
+import boto3
+import json
+from pyspark.sql import SparkSession
+from pyspark.sql.types import StructType, StructField, StringType, IntegerType, BooleanType # and other data types as needed
+
+def fetch_youtube_videos():
+    
+    AWS_REGION = "eu-north-1"  # replace with your AWS region
+    S3_BUCKET = "bhavika-etl-youtube"  # replace with your bucket name
+    OUTPUT_PATH = f"s3a://{S3_BUCKET}"  # Spark uses 's3a' scheme
+
+
+    spark = (
+    SparkSession.builder
+    .appName("YouTubeDataETL")
+    .config(
+        "spark.jars.packages",
+        "org.apache.hadoop:hadoop-aws:3.3.2,com.amazonaws:aws-java-sdk-bundle:1.12.526"
+    )
+    .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
+    .config("spark.hadoop.fs.s3a.endpoint", "s3.eu-north-1.amazonaws.com")
+    .config("spark.hadoop.fs.s3a.path.style.access", "true")
+    .config("spark.hadoop.fs.s3a.connection.timeout", "60000")  # in milliseconds
+    .config("spark.hadoop.fs.s3a.attempts.maximum", "10")
+    .getOrCreate())
+
+    
+    # Define API key and channel ID here
+    API_KEY = "<api-key>"
+    CHANNEL_ID = "UCk2U-Oqn7RXf-ydPqfSxG5g"  # replace with the correct channel ID
+    
+    # Step 1: Get Uploads Playlist ID
+    url = f"https://www.googleapis.com/youtube/v3/channels?part=contentDetails&id={CHANNEL_ID}&key={API_KEY}"
+    channel_response = requests.get(url).json()
+
+    if "items" not in channel_response or len(channel_response["items"]) == 0:
+        raise Exception("No channel found. Check your CHANNEL_ID or API_KEY.")
+
+    uploads_playlist_id = channel_response["items"][0]["contentDetails"]["relatedPlaylists"]["uploads"]
+
+    # Step 2: Get Videos from Uploads Playlist
+    videos = []
+    next_page_token = None
+
+    while True:
+        playlist_url = (
+            f"https://www.googleapis.com/youtube/v3/playlistItems"
+            f"?part=snippet,contentDetails&maxResults=50&playlistId={uploads_playlist_id}"
+            f"&key={API_KEY}"
+        )
+        if next_page_token:
+            playlist_url += f"&pageToken={next_page_token}"
+
+        resp = requests.get(playlist_url).json()
+
+        for item in resp.get("items", []):
+            videos.append({
+                "videoId": item["contentDetails"]["videoId"],
+                "title": item["snippet"]["title"],
+                "publishedAt": item["contentDetails"]["videoPublishedAt"]
+            })
+
+        next_page_token = resp.get("nextPageToken")
+        if not next_page_token:
+            break
+
+
+    # Step 3: Create Spark DataFrame
+    schema = StructType([
+    StructField("videoId", StringType(), True),
+    StructField("title", StringType(), True),
+    StructField("publishedAt", StringType(), True)# Example of a non-nullable field
+    ])
+
+    df = spark.createDataFrame(videos, schema)
+
+    # Step 4: Save DataFrame as CSV
+    df.write.mode("overwrite").option("header", True).csv(OUTPUT_PATH)
+    print("✅ Data saved as CSV in '{OUTPUT_PATH}' folder")
+    df.show()
+    return df
+fetch_youtube_videos()
+
+
