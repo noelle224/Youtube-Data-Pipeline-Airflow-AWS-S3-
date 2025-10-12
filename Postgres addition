@@ -1,0 +1,91 @@
+from datetime import datetime
+from airflow import DAG
+from airflow.decorators import task
+from airflow.sensors.base import PokeReturnValue
+from airflow.providers.common.sql.operators.sql import SQLExecuteQueryOperator
+from airflow.providers.postgres.hooks.postgres import PostgresHook
+import requests
+
+@task.sensor(poke_interval = 30, timeout = 300)
+def is_api_available():
+    url = "https://www.googleapis.com/youtube/v3/playlistItems?part=snippet,contentDetails&maxResults=50&playlistId=UU5kJanyOVRUN5gwxKYQaKDA&key=AIzaSyDsOHg1ImU"
+    try:
+        response = requests.get(url, timeout=10)
+        if response.status_code == 200:
+            videos = response.json()
+            condition = True
+        else:
+            videos = None
+            condition = False
+        print(videos)
+    except requests.RequestException:
+        videos = None
+        condition = False
+    return PokeReturnValue(is_done=condition, xcom_value=videos)
+
+@task
+def extract_video_fields(videos):
+    items = videos.get("items", [])
+    extracted_data = []
+    for item in items:
+        video_id = item["contentDetails"]["videoId"]
+        title = item["snippet"]["title"]
+        published_at = item["snippet"]["publishedAt"]
+        extracted_data.append({
+            "video_id": video_id,
+            "title": title,
+            "published_at": published_at
+        })
+    print(extracted_data)
+    return extracted_data
+
+@task
+def insert_into_postgres(videos):
+    hook = PostgresHook(postgres_conn_id="postgres")
+    for video in videos:
+        hook.run(
+            sql="""
+                INSERT INTO channel_videos(video_id, title, published_at)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (video_id) DO NOTHING
+            """,
+            parameters=(video["video_id"], video["title"], video["published_at"])  # since video = (id, title)
+        )
+
+
+with DAG(
+    dag_id="user_processing_dag",
+    start_date=datetime(2024, 1, 1),
+    schedule=None,  # Manual trigger
+    catchup=False,
+    tags=["example"],
+) as dag:
+    
+    api_sensor = is_api_available()
+    extracted = extract_video_fields(is_api_available())
+    insertion = insert_into_postgres(extracted)
+
+    create_table = SQLExecuteQueryOperator(
+        task_id="create_user_table",
+        conn_id="postgres",  # Must match a connection set up in Airflow UI
+        sql="""
+            CREATE TABLE IF NOT EXISTS users (
+                id INT PRIMARY KEY,
+                firstname VARCHAR(255),
+                lastname VARCHAR(255),
+                email VARCHAR(255),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS channel_videos (
+                video_id varchar(255) PRIMARY KEY,
+                title varchar(255),
+                published_at varchar(255)
+            );
+        """
+    )
+
+    api_sensor >> extracted >> create_table >> insertion
+
+    # If you had more tasks, you’d define dependencies like:
+    # create_table >> another_task
